@@ -1,0 +1,606 @@
+# Robotic-Arm
+
+// GPIO.h
+#ifndef GPIO_H
+#define GPIO_H
+ 
+#include <string>
+ 
+class GPIO {
+private:
+    // File descriptor
+    int fd;
+ 
+    /**
+    * Generate a PWM signal, blocking the caller while the signal is being
+    * generated.
+    *
+    * @param period
+    * PWM period in microseconds.
+    *
+    * @param pulse
+    * Duration of the pulse in microseconds.
+    *
+    * @param num_periods
+    * Number of periods to generate.
+    */
+    void GeneratePWM(int period, int pulse, int num_periods);
+ 
+    /**
+     * Generates variable PWM signals, so that the arm moves in a more controlled manner.
+     * @param period  PWM period in microseconds
+     * @param first_pulse duration of the first pulse in microseconds
+     * @param last_pulse duration the last pulse in microseconds
+     * @param num_periods number of periods to generate
+     */
+    void GenerateVariablePWM(int period, int first_pulse, int last_pulse, int num_periods);
+ 
+public:
+    std::string part_name;
+ 
+    /**
+    * Class constructor.
+    *
+    * @param number
+    * Port number for GPIO.
+    */
+    GPIO(int number, std::string part_name);
+ 
+    /**
+    * Class destructor.
+    */
+    ~GPIO();
+ 
+    /**
+     * Moves to the given angle for one period.
+     * @param angle angle in degrees
+     */
+    void MoveToAngle(int angle);
+ 
+    /**
+     * Moves to the given angle and stays for the specified period of time
+     * @param angle angle in degrees
+     * @param milliSeconds duration in millis
+     */
+    void MoveToAngle(int angle, int milliSeconds);
+ 
+    /**
+     * Moves to the given start angle, and starts moving to the end angle in the specified period of time
+     * @param angle1 the start angle in degrees
+     * @param angle2 the end angle in degrees
+     * @param milliSeconds duration in millis
+     */
+    void MoveToAngle(int angle1, int angle2, int milliSeconds);
+};
+
+// GPIO.cpp
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <iostream>
+#include <stdlib.h>
+#include "GPIO.h"
+ 
+using namespace std;
+ 
+const int PERIOD_IN_MICRO = 20000;
+ 
+int degreeToOnDelay(int angle) {
+    return (angle * 10) + 600;
+}
+ 
+GPIO::GPIO(int number, string partName) {
+    // GPIO device files will follow the format
+    // /sys/class/gpio/gpio<NR>/value
+    // <NR> has to be replaced with the actual device number passed as an
+    // argument to the class constructor.
+    char device_name[128];
+    sprintf(device_name, "/sys/class/gpio/gpio%d/value", number);
+    // Open special device file and store file descriptor in class member.
+    fd = open(device_name, O_WRONLY);
+    if (fd < 0) {
+        std::cerr << "Cannot open " << device_name << " - forgot sudo? \n";
+        exit(1);
+    }
+ 
+    part_name = partName;
+}
+ 
+GPIO::~GPIO() {
+    // Close open file descriptor
+    close(fd);
+}
+ 
+void GPIO::GeneratePWM(int period, int pulse, int num_periods) {
+    // Generate num_periods of the PWM signal
+    for (int i = 0; i < num_periods; i++) {
+        // Write ASCII character "1" to raise pin to 1, starting the
+        // ON cycle, then wait duration of pulse.
+        write(fd, "1", 1);
+        usleep(pulse);
+        // Write ASCII character "0" to lower pin to 0, starting the
+        // OFF cycle, then wait the rest of the period time.
+        write(fd, "0", 1);
+        usleep(period - pulse);
+    }
+}
+ 
+void GPIO::MoveToAngle(int angle) {
+    int pulse = degreeToOnDelay(angle);
+    write(fd, "1", 1);
+    usleep(pulse);
+    write(fd, "0", 1);
+    usleep(PERIOD_IN_MICRO - pulse);
+}
+ 
+void GPIO::MoveToAngle(int angle, int milliSeconds) {
+    GeneratePWM(PERIOD_IN_MICRO, degreeToOnDelay(angle), milliSeconds * 700 / PERIOD_IN_MICRO);
+}
+ 
+void GPIO::MoveToAngle(int angle1, int angle2, int milliSeconds) {
+    GenerateVariablePWM(PERIOD_IN_MICRO, degreeToOnDelay(angle1), degreeToOnDelay(angle2), milliSeconds * 700 / PERIOD_IN_MICRO);
+}
+ 
+void GPIO::GenerateVariablePWM(int period, int first_pulse, int last_pulse, int num_periods) {
+    double speed = (last_pulse - first_pulse) * 1.0 / num_periods;
+    double pulse = first_pulse;
+    for (int i = 0; i <= num_periods; i++) {
+        pulse = first_pulse + speed * i;
+        GeneratePWM(period, pulse, 1);
+    }
+}
+
+// ZedBoard.h
+#ifndef ZEDBOARD_H
+#define ZEDBOARD_H
+ 
+class ZedBoard {
+private:
+    int fd;
+    char* pBase;
+    int RegisterRead(int offset);
+ 
+public:
+    ZedBoard();
+    ~ZedBoard();
+ 
+    /**
+     * Checks whether the center button on the ZedBoard is being pressed.
+     * @return true if pressed, false if not.
+     */
+    bool CenterButtonGetsPressed();
+};
+ 
+#endif
+// ZedBoard.cpp
+#include <iostream>
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <math.h>
+#include "ZedBoard.h"
+ 
+using namespace std;
+ 
+const unsigned gpio_address = 0x400d0000; // Physical base address of GPIO
+const unsigned gpio_size = 0xff; // Length of memory-mapped IO window
+const int gpio_pbtnc_offset = 0x17C; // offset for center button
+ 
+ZedBoard::ZedBoard() {
+    cout << "Creating ZedBoard object ...\n";
+    fd = open("/dev/mem", O_RDWR);
+    if (fd == -1) {
+        cerr << "Error: Could not open virtual file for ZedBoard - forgot sudo?\n";
+        exit(1);
+    }
+ 
+    pBase = (char*) mmap(
+            NULL,
+            gpio_size,
+            PROT_READ|PROT_WRITE,
+            MAP_SHARED,
+            fd,
+            gpio_address
+    );
+}
+ 
+ZedBoard::~ZedBoard() {
+    munmap(pBase, gpio_size);
+    close(fd);
+}
+ 
+int ZedBoard::RegisterRead(int offset) {
+    return *(int*) (pBase + offset);
+}
+ 
+bool ZedBoard::CenterButtonGetsPressed() {
+    return RegisterRead(gpio_pbtnc_offset);
+}
+
+// MoveBottles.cpp
+#include <iostream>
+#include <stdlib.h>
+#include <pthread.h>
+#include "GPIO.h"
+#include "ZedBoard.h"
+ 
+using namespace std;
+ 
+#define NUM_THREADS 5
+ 
+int servoToPortNumber(int servoNumber) {
+	switch (servoNumber) {
+		case 1:
+			return 13;
+		case 2:
+			return 10;
+		case 3:
+			return 11;
+		case 4:
+			return 12;
+		case 5:
+			return 0;
+		default:
+			cout << "Invalid servo number\n";
+			exit(1);
+	}
+}
+ 
+GPIO initServo(int servoNumber, string partName) {
+	int portNumber = servoToPortNumber(servoNumber);
+ 
+	return GPIO(portNumber, partName);
+}
+ 
+const int base_start_angle = 76;
+const int bicep_start_angle = 70;
+const int elbow_start_angle = 90;
+const int wrist_start_angle = 90;
+const int gripper_start_angle = 0;
+ 
+const int wait_before_end_phase_millis = 10;
+ 
+GPIO base = initServo(1, "base");
+GPIO bicep = initServo(2, "bicep");
+GPIO elbow = initServo(3, "elbow");
+GPIO wrist = initServo(4, "wrist");
+GPIO gripper = initServo(5, "gripper");
+ 
+bool challengeStarted = false;
+ 
+int armPartsDone = 0;
+pthread_mutex_t armPartsDoneLock;
+ 
+const int refresh_interval_milli_seconds = 500;
+ 
+/*
+ * Makes the given part stay at the given angle until it's signaled that the challenge has started.
+ */
+void startUpPhase(GPIO* armPart, int startUpAngle) {
+    cout << "Start up phase for " << armPart->part_name << " began ...\n";
+    while (!challengeStarted) {
+        armPart->MoveToAngle(startUpAngle, refresh_interval_milli_seconds);
+    }
+}
+ 
+/*
+ * Only moved the art part to the finish angle until all the arm parts are ready to do so.
+ */
+void finishPhase(GPIO* armPart, int finishAngle) {
+    pthread_mutex_lock(&armPartsDoneLock);
+    armPartsDone++;
+    pthread_mutex_unlock(&armPartsDoneLock);
+    cout << "End phase for " << armPart->part_name << " began ...\n";
+ 
+    while (armPartsDone < 5) {
+        // do nothing
+    }
+ 
+    while (true) {
+        armPart->MoveToAngle(finishAngle, refresh_interval_milli_seconds);
+    }
+}
+ 
+void* moveBase(void* i) {
+    startUpPhase(&base, base_start_angle);
+ 
+    // pick up first bottle
+    base.MoveToAngle(76, 2000);       
+    
+    // move first from 2 to 3
+    base.MoveToAngle(76, 95, 1000);
+    base.MoveToAngle(95, 2000);     
+    
+    
+     // move first from 3 to 1 to pickup
+    base.MoveToAngle(95, 52, 1000);
+    base.MoveToAngle(52, 2000); 
+    
+    //move fom 1 st to 2 nd 
+    base.MoveToAngle(52, 76, 1000);
+    base.MoveToAngle(76, 3000);    
+    
+    
+    
+    //move fom 3 rd to 1 st 
+    base.MoveToAngle(76, 95, 1000);
+    base.MoveToAngle(95, 6000);  
+    
+    
+    //move fom 3 rd to 1 st 
+    base.MoveToAngle(95, 52, 1000);
+    base.MoveToAngle(52, 4000);  
+    
+     
+    
+    
+                                                                                                        
+ 
+    int lastAngle = 73;
+    base.MoveToAngle(lastAngle, wait_before_end_phase_millis);
+    finishPhase(&base, base_start_angle);
+    pthread_exit(NULL);
+}
+ 
+void* moveBicep(void* i) {
+    startUpPhase(&bicep, bicep_start_angle);
+ 
+    // pick up first bottle
+    bicep.MoveToAngle(70, 115, 1000);
+    bicep.MoveToAngle(115, 1000);
+    bicep.MoveToAngle(115, 70, 1000);
+    
+    // put the 2 to 3
+    bicep.MoveToAngle(70, 120, 1000);
+    bicep.MoveToAngle(120, 3000);
+    
+    ///////////////////////////////////////////////////////////
+    /// holding when base move 
+    bicep.MoveToAngle(120, 70, 1000);
+    bicep.MoveToAngle(70, 1000);
+    
+    //////////////////////////////////
+    
+    // put  1 st  to 2 nd
+     bicep.MoveToAngle(70, 120, 1000);
+    bicep.MoveToAngle(120, 1500);
+    bicep.MoveToAngle(120, 70, 1000);
+    
+    
+ 
+    
+    ///////////////////////////////////////////////////////////
+    /// holding when base move 
+    //bicep.MoveToAngle(130, 70, 1000);
+    bicep.MoveToAngle(70, 2000);
+    
+    // pick up 3 rd 
+     bicep.MoveToAngle(70, 125, 1000);
+    bicep.MoveToAngle(125, 2000);
+    bicep.MoveToAngle(125, 70, 2000);
+    
+    
+    // put 3 rd to 1 st
+     bicep.MoveToAngle(70, 130, 1000);
+    bicep.MoveToAngle(130, 2000);
+    
+    
+    bicep.MoveToAngle(130, 90, 500);
+     bicep.MoveToAngle(90, 1000);
+    
+    
+    
+ 
+   
+ 
+    int lastAngle = 100;
+    bicep.MoveToAngle(lastAngle, wait_before_end_phase_millis);
+    finishPhase(&bicep, bicep_start_angle);
+    pthread_exit(NULL);
+}
+ 
+void* moveElbow(void* i) {
+    startUpPhase(&elbow, elbow_start_angle);
+ 
+    // pick up first bottle
+    elbow.MoveToAngle(95, 130, 1000);
+    
+    elbow.MoveToAngle(130, 1000);
+    
+    elbow.MoveToAngle(130, 100 , 500);
+    elbow.MoveToAngle(100, 1000);
+    
+    
+    // move 2 to 3
+    elbow.MoveToAngle(100, 90 , 500);
+    elbow.MoveToAngle(90, 120 , 500);
+    
+    /////////////////////////////////////////////
+    //// holding when the base move 
+    elbow.MoveToAngle(120, 90 , 500);
+      elbow.MoveToAngle(90, 1500);
+    
+    
+    // Get the 1 rd bottle 
+     elbow.MoveToAngle(90, 125 , 500);
+    elbow.MoveToAngle(125, 2000);
+    
+     elbow.MoveToAngle(125, 100 , 500);
+    elbow.MoveToAngle(100, 1000);
+    
+    // move 1 to 2
+    elbow.MoveToAngle(100, 90 , 500);
+    elbow.MoveToAngle(90, 120 , 500);
+    
+    
+    /////////////////////////////////////////////
+    //// holding when the base move 
+    elbow.MoveToAngle(120, 90 , 500);
+      elbow.MoveToAngle(90, 1500);
+      
+      
+      // Get the 3 rd bottle 
+     elbow.MoveToAngle(90, 113 , 500);
+    elbow.MoveToAngle(113, 2000);
+    
+     elbow.MoveToAngle(113, 100 , 500);
+    elbow.MoveToAngle(100, 1000);
+    
+    // move 1 to 2
+    elbow.MoveToAngle(100, 90 , 500);
+    elbow.MoveToAngle(90, 120 , 500);
+    
+     elbow.MoveToAngle(120, 1000);
+     elbow.MoveToAngle(120, 90 , 500);
+       elbow.MoveToAngle(90, 1000);
+   
+ 
+ 
+ 
+    int lastAngle = 90;
+    elbow.MoveToAngle(lastAngle, wait_before_end_phase_millis);
+    finishPhase(&elbow, elbow_start_angle);
+    pthread_exit(NULL);
+}
+ 
+void* moveWrist(void* i) {
+    startUpPhase(&wrist, wrist_start_angle);
+ 
+    // pick up first bottle and move to 3 rd pisition
+    wrist.MoveToAngle(90, 90, 1000);
+     wrist.MoveToAngle(90, 4000);
+     
+     
+     ///////////////////////////////////////////
+     
+     // pick up first bottle and move to 3 rd pisition
+    wrist.MoveToAngle(90, 90, 1000);
+     wrist.MoveToAngle(90, 4000);
+     
+     
+      ///////////////////////////////////////////
+     
+     // pick up first bottle and move to 3 rd pisition
+    wrist.MoveToAngle(90, 90, 1000);
+     wrist.MoveToAngle(90, 11000);
+      wrist.MoveToAngle(90, 50, 200);
+     
+ 
+    
+   
+ 
+    int lastAngle = 95;
+    wrist.MoveToAngle(lastAngle, wait_before_end_phase_millis);
+    finishPhase(&wrist, wrist_start_angle);
+    pthread_exit(NULL);
+}
+ 
+void* moveGripper(void* i) {
+    startUpPhase(&gripper, gripper_start_angle);
+ 
+    // pick up first bottle
+    gripper.MoveToAngle(180, 1500);
+    gripper.MoveToAngle(-10, 500);
+    gripper.MoveToAngle(-20, 2500);
+    
+    // leave the first bottle 
+    gripper.MoveToAngle(180, 500);
+    
+    
+    
+    
+    /////////////////////////////////
+    
+     // pick up 2nd bottle
+    gripper.MoveToAngle(180, 1600);
+    gripper.MoveToAngle(180, -20, 500);
+    gripper.MoveToAngle(-20, 2900);
+    
+    // put the first bottle 
+    gripper.MoveToAngle(-10, 180, 1000);
+    
+    
+     // pick up 3rd bottle
+    gripper.MoveToAngle(180, 1000);
+    gripper.MoveToAngle(180, -10, 500);
+    gripper.MoveToAngle(-10, 1500);
+    
+     gripper.MoveToAngle(-10, 180, 500);
+     gripper.MoveToAngle(180, 1200);
+     
+     gripper.MoveToAngle(180, -10, 1000);
+     gripper.MoveToAngle(-10, 5500);
+      gripper.MoveToAngle(180, 500);
+     
+     
+    
+    
+   
+    
+    
+    
+ 
+ 
+    int lastAngle = 45;
+    gripper.MoveToAngle(lastAngle, wait_before_end_phase_millis);
+    finishPhase(&gripper, gripper_start_angle);
+    pthread_exit(NULL);
+}
+ 
+int main()
+{
+    ZedBoard zedBoard;
+    pthread_t threads[NUM_THREADS];
+ 
+    pthread_create(&threads[0], NULL, moveBase, NULL);
+    pthread_create(&threads[1], NULL, moveBicep, NULL);
+    pthread_create(&threads[2], NULL, moveElbow, NULL);
+    pthread_create(&threads[3], NULL, moveWrist, NULL);
+    pthread_create(&threads[4], NULL, moveGripper, NULL);
+ 
+    while (!challengeStarted) {
+        challengeStarted = zedBoard.CenterButtonGetsPressed();
+    }
+ 
+    pthread_exit(NULL);
+    return 0;
+}
+ 
+ 
+ 
+// Makefile
+ 
+main: GPIO.o ZedBoard.o MoveBottles.o
+	g++ GPIO.o ZedBoard.o MoveBottles.o -o main -lpthread
+ 
+MoveBottles.o: MoveBottles.cpp GPIO.h ZedBoard.h
+	g++ -g -Wall -c MoveBottles.cpp -lpthread
+ 
+GPIO.o: GPIO.cpp GPIO.h
+	g++ -g -Wall -c GPIO.cpp -lpthread
+ 
+ZedBoard.o: ZedBoard.cpp ZedBoard.h
+	g++ -g -Wall -c ZedBoard.cpp -lpthread
+ 
+clean:
+	rm main *.o
+ 
+// GPIO.sh
+FILEPATH='/sys/class/gpio'
+echo 13 > $FILEPATH/unexport 2>/dev/null
+echo 10 > $FILEPATH/unexport 2>/dev/null
+echo 11 > $FILEPATH/unexport 2>/dev/null
+echo 12 > $FILEPATH/unexport 2>/dev/null
+echo 0 > $FILEPATH/unexport 2>/dev/null
+echo 13 > $FILEPATH/export
+echo 10 > $FILEPATH/export
+echo 11 > $FILEPATH/export
+echo 12 > $FILEPATH/export
+echo 0 > $FILEPATH/export
+echo out > $FILEPATH/gpio13/direction
+echo out > $FILEPATH/gpio10/direction
+echo out > $FILEPATH/gpio11/direction
+echo out > $FILEPATH/gpio12/direction
+echo out > $FILEPATH/gpio0/direction
